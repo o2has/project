@@ -1,94 +1,86 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { CoinsIcon, UserIcon } from 'lucide-react';
 import { CreateMatchModal } from '../components/CreateMatchModal';
-
-interface Match {
-  id: number;
-  creator: string;
-  side: 'heads' | 'tails';
-  items: Array<{
-    id: number;
-    name: string;
-    value: number;
-    rarity: string;
-  }>;
-  totalValue: number;
-  createdAt: string;
-}
+import { useMatchStore } from '../store/matchStore';
+import { supabase } from '../lib/supabase';
 
 export const CoinflipPage: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'all' | 'my'>('all');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [matches, setMatches] = useState<Match[]>([
-    {
-      id: 1,
-      creator: 'CoinMaster',
-      side: 'heads',
-      items: [
-        { id: 1, name: 'Golden Coin', value: 100, rarity: 'rare' },
-        { id: 2, name: 'Lucky Charm', value: 50, rarity: 'uncommon' }
-      ],
-      totalValue: 150,
-      createdAt: '2 min ago'
-    },
-    {
-      id: 2,
-      creator: 'FlipKing',
-      side: 'tails',
-      items: [
-        { id: 3, name: 'Mystery Box', value: 200, rarity: 'epic' }
-      ],
-      totalValue: 200,
-      createdAt: '5 min ago'
-    }
-  ]);
+  const [availableItems, setAvailableItems] = useState<any[]>([]);
+  const { matches, loading, fetchMatches, createMatch, joinMatch } = useMatchStore();
+  const [userId, setUserId] = useState<string | null>(null);
 
-  const availableItems = [
-    {
-      id: 1,
-      name: 'Golden Coin',
-      value: 100,
-      rarity: 'rare',
-      image: 'https://images.pexels.com/photos/106152/euro-coins-currency-money-106152.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1'
-    },
-    {
-      id: 2,
-      name: 'Mystery Box',
-      value: 200,
-      rarity: 'epic',
-      image: 'https://images.pexels.com/photos/821718/pexels-photo-821718.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1'
-    },
-    {
-      id: 3,
-      name: 'Lucky Charm',
-      value: 50,
-      rarity: 'uncommon',
-      image: 'https://images.pexels.com/photos/4588036/pexels-photo-4588036.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=1'
-    }
-  ];
-
-  const handleCreateMatch = (side: 'heads' | 'tails', selectedItemIds: number[]) => {
-    const selectedItems = availableItems
-      .filter(item => selectedItemIds.includes(item.id))
-      .map(({ image, ...item }) => item);
-
-    const totalValue = selectedItems.reduce((sum, item) => sum + item.value, 0);
-
-    const newMatch: Match = {
-      id: matches.length + 1,
-      creator: 'Player',
-      side,
-      items: selectedItems,
-      totalValue,
-      createdAt: 'Just now'
+  useEffect(() => {
+    const fetchItems = async () => {
+      const { data: items } = await supabase.from('items').select('*');
+      if (items) setAvailableItems(items);
     };
 
-    setMatches([newMatch, ...matches]);
+    const fetchUser = async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) setUserId(user.id);
+    };
+
+    fetchItems();
+    fetchUser();
+    fetchMatches();
+
+    // Subscribe to changes
+    const channel = supabase
+      .channel('matches')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'matches' }, () => {
+        fetchMatches();
+      })
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
+  }, [fetchMatches]);
+
+  const handleCreateMatch = async (side: 'heads' | 'tails', selectedItemIds: string[]) => {
+    try {
+      await createMatch(side, selectedItemIds);
+      setIsCreateModalOpen(false);
+    } catch (error) {
+      console.error('Error creating match:', error);
+    }
+  };
+
+  const handleJoinMatch = async (matchId: string) => {
+    try {
+      const match = matches.find(m => m.id === matchId);
+      if (!match) return;
+
+      const matchValue = match.items.reduce((sum, item) => sum + item.value, 0);
+      const targetValue = matchValue; // You want to match this value approximately
+
+      // Find a combination of items that matches the target value within 10%
+      const validItems = availableItems.filter(item => {
+        const totalValue = item.value;
+        return totalValue >= matchValue * 0.9 && totalValue <= matchValue * 1.1;
+      });
+
+      if (validItems.length === 0) {
+        alert('No valid items found to join this match');
+        return;
+      }
+
+      await joinMatch(matchId, [validItems[0].id]);
+    } catch (error) {
+      console.error('Error joining match:', error);
+      alert(error instanceof Error ? error.message : 'Error joining match');
+    }
   };
 
   const displayedMatches = activeTab === 'my' 
-    ? matches.filter(match => match.creator === 'Player')
+    ? matches.filter(match => match.items.some(item => item.user_id === userId))
     : matches;
+
+  if (loading) {
+    return <div className="text-center py-8">Loading...</div>;
+  }
 
   return (
     <div className="max-w-5xl mx-auto">
@@ -132,19 +124,19 @@ export const CoinflipPage: React.FC = () => {
                   <UserIcon size={20} className="text-gray-400" />
                 </div>
                 <div>
-                  <h3 className="font-medium">{match.creator}</h3>
-                  <p className="text-sm text-gray-400">{match.createdAt}</p>
+                  <h3 className="font-medium">Player</h3>
+                  <p className="text-sm text-gray-400">{new Date(match.created_at).toLocaleString()}</p>
                 </div>
               </div>
               <div className="flex items-center">
                 <div className={`px-4 py-2 rounded-lg mr-4 ${
-                  match.side === 'heads' ? 'bg-yellow-900/20 text-yellow-400' : 'bg-gray-900/40 text-gray-300'
+                  match.selected_side === 'heads' ? 'bg-yellow-900/20 text-yellow-400' : 'bg-gray-900/40 text-gray-300'
                 }`}>
-                  {match.side.charAt(0).toUpperCase() + match.side.slice(1)}
+                  {match.selected_side.charAt(0).toUpperCase() + match.selected_side.slice(1)}
                 </div>
                 <div className="flex items-center bg-gray-700 px-4 py-2 rounded-lg">
                   <CoinsIcon size={16} className="text-yellow-400 mr-2" />
-                  <span>{match.totalValue}</span>
+                  <span>{match.items.reduce((sum, item) => sum + item.value, 0)}</span>
                 </div>
               </div>
             </div>
@@ -170,9 +162,14 @@ export const CoinflipPage: React.FC = () => {
                   </div>
                 ))}
               </div>
-              <button className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-colors">
-                Join Match
-              </button>
+              {match.items.every(item => item.user_id !== userId) && (
+                <button 
+                  onClick={() => handleJoinMatch(match.id)}
+                  className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium transition-colors"
+                >
+                  Join Match
+                </button>
+              )}
             </div>
           </div>
         ))}
